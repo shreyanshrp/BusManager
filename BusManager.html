@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Bus Manager Pro</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        body { font-family: sans-serif; background-color: #f3f4f6; -webkit-tap-highlight-color: transparent; }
+        .card { background: white; border-radius: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        .no-select { user-select: none; }
+        .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+        [x-cloak] { display: none !important; }
+    </style>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getAuth, signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+        // --- YOUR CONFIGURATION ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyA_xH-tkgUtpMYOGrO_r8y-SXhEHjUFZOU",
+            authDomain: "busmanager-939c2.firebaseapp.com",
+            projectId: "busmanager-939c2",
+            storageBucket: "busmanager-939c2.firebasestorage.app",
+            messagingSenderId: "440885779093",
+            appId: "1:440885779093:web:10cea622980ce7c2b6599c"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // The Main Logic Function
+        const busAppLogic = () => ({
+            // View States
+            view: 'dashboard',
+            showAddStudentModal: false,
+            showAddExpenseModal: false,
+            selectedStudent: null,
+            searchQuery: '',
+            statusFilter: 'active',
+            reportFilter: 'unpaid',
+            
+            // Auth & Sync States
+            loading: true,
+            user: null,
+            isSaving: false,
+            saveTimeout: null,
+            authMode: 'login', // login or signup
+            email: '',
+            password: '',
+
+            // Data
+            students: [],
+            expenses: [],
+            newStudent: { name: '', area: '', phone: '', fee: '', joinDate: '' },
+            newExpense: { name: '', amount: '' },
+            
+            // Dates
+            currentMonthKey: new Date().toISOString().slice(0, 7),
+            selectedMonthKey: new Date().toISOString().slice(0, 7),
+            tempStatusDate: '',
+
+            init() {
+                // Monitor Auth State
+                onAuthStateChanged(auth, async (u) => {
+                    this.user = u;
+                    if (u) {
+                        await this.loadData();
+                    } else {
+                        this.students = [];
+                        this.expenses = [];
+                    }
+                    this.loading = false;
+                    
+                    // Default Values
+                    this.newStudent.joinDate = this.currentMonthKey;
+
+                    // Auto-Save Watchers (Debounced)
+                    this.$watch('students', () => this.queueSave());
+                    this.$watch('expenses', () => this.queueSave());
+                });
+            },
+
+            // --- AUTH ACTIONS ---
+            async signInGoogle() {
+                try {
+                    await signInWithPopup(auth, new GoogleAuthProvider());
+                } catch (e) { alert(e.message); }
+            },
+            async signInEmail() {
+                try {
+                    await signInWithEmailAndPassword(auth, this.email, this.password);
+                } catch (e) { alert(e.message); }
+            },
+            async signUpEmail() {
+                try {
+                    await createUserWithEmailAndPassword(auth, this.email, this.password);
+                } catch (e) { alert(e.message); }
+            },
+            async logout() {
+                await signOut(auth);
+            },
+
+            // --- CLOUD SYNC ---
+            async loadData() {
+                if (!this.user) return;
+                try {
+                    const docRef = doc(db, "users", this.user.uid);
+                    const docSnap = await getDoc(docRef);
+                    
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        this.students = data.students || [];
+                        this.expenses = data.expenses || [];
+                    } else {
+                        this.students = [];
+                        this.expenses = [];
+                    }
+                } catch (e) {
+                    console.error("Error loading", e);
+                    // alert("Error loading data from cloud"); // Silenced for now
+                }
+            },
+
+            queueSave() {
+                if (!this.user || this.loading) return;
+                this.isSaving = true;
+                clearTimeout(this.saveTimeout);
+                this.saveTimeout = setTimeout(() => {
+                    this.pushDataToCloud();
+                }, 2000);
+            },
+
+            async pushDataToCloud() {
+                if (!this.user) return;
+                try {
+                    await setDoc(doc(db, "users", this.user.uid), {
+                        students: JSON.parse(JSON.stringify(this.students)), // Clean Proxies
+                        expenses: JSON.parse(JSON.stringify(this.expenses))
+                    });
+                    this.isSaving = false;
+                } catch (e) {
+                    console.error("Save error", e);
+                    this.isSaving = false;
+                }
+            },
+
+            // --- APP LOGIC ---
+            get currentDateDisplay() {
+                return new Date().toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'long' });
+            },
+            get filteredStudents() {
+                let list = this.students;
+                if(this.statusFilter === 'active') list = list.filter(s => s.status !== 'left');
+                if(this.statusFilter === 'left') list = list.filter(s => s.status === 'left');
+                const q = this.searchQuery.toLowerCase();
+                if(q) list = list.filter(s => s.name.toLowerCase().includes(q) || s.area.toLowerCase().includes(q));
+                return list;
+            },
+            get studentsDue() {
+                return this.students
+                    .filter(s => s.status !== 'left')
+                    .filter(s => this.getDueMonthsCount(s) > 0)
+                    .sort((a, b) => this.getStudentTotalDue(b) - this.getStudentTotalDue(a));
+            },
+            get dashboardStats() {
+                const collected = this.students.reduce((sum, s) => {
+                    const paid = s.payments.find(p => p.month === this.currentMonthKey);
+                    return sum + (paid ? Number(s.fee) : 0);
+                }, 0);
+                const pending = this.studentsDue.reduce((sum, s) => sum + this.getStudentTotalDue(s), 0);
+                return { collected, pending };
+            },
+            get monthlyExpenses() {
+                return this.expenses.filter(e => e.month === this.selectedMonthKey);
+            },
+            get monthlyReport() {
+                let paid = [], unpaid = [];
+                this.students.forEach(s => {
+                    if(this.isMonthBillable(s, this.selectedMonthKey)) {
+                        const isPaid = s.payments.some(p => p.month === this.selectedMonthKey);
+                        const item = { student: s, paid: isPaid };
+                        if(isPaid) paid.push(item); else unpaid.push(item);
+                    }
+                });
+                return { paid, unpaid };
+            },
+            get monthlyStats() {
+                const income = this.monthlyReport.paid.reduce((sum, item) => sum + Number(item.student.fee), 0);
+                const expense = this.monthlyExpenses.reduce((sum, e) => sum + Number(e.amount), 0);
+                return { income, expense, net: income - expense };
+            },
+            isMonthBillable(s, monthKey) {
+                if (monthKey < s.joinDate) return false;
+                if (monthKey > this.currentMonthKey) return false;
+                if (s.status === 'left' && s.leftDate && monthKey > s.leftDate) return false;
+                if (s.status === 'paused' && s.resumeDate && monthKey >= this.currentMonthKey && monthKey < s.resumeDate) return false;
+                return true;
+            },
+            getStudentMonthHistory(s) {
+                let months = [];
+                let d = new Date(s.joinDate + "-01");
+                let now = new Date();
+                now.setDate(1);
+                while (d <= now) {
+                    const mKey = d.toISOString().slice(0, 7);
+                    const isBillable = this.isMonthBillable(s, mKey);
+                    const payment = s.payments.find(p => p.month === mKey);
+                    months.push({
+                        key: mKey,
+                        label: d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+                        paid: !!payment,
+                        paidDate: payment ? payment.date : null,
+                        billable: isBillable
+                    });
+                    d.setMonth(d.getMonth() + 1);
+                }
+                return months.reverse();
+            },
+            getDueMonthsCount(s) {
+                return this.getStudentMonthHistory(s).filter(m => m.billable && !m.paid).length;
+            },
+            getStudentTotalDue(s) {
+                return this.getDueMonthsCount(s) * Number(s.fee);
+            },
+            changeMonth(offset) {
+                const [y, m] = this.selectedMonthKey.split('-').map(Number);
+                const newDate = new Date(y, m - 1 + offset, 1);
+                this.selectedMonthKey = newDate.toISOString().slice(0, 7);
+            },
+            formatMonth(key) {
+                const [y, m] = key.split('-');
+                return new Date(y, m - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+            },
+            openAddStudent() {
+                this.newStudent = { name: '', area: '', phone: '', fee: '', joinDate: this.currentMonthKey };
+                this.showAddStudentModal = true;
+            },
+            openStudentModal(s) {
+                this.selectedStudent = s;
+                if(s) {
+                    if(s.status === 'left') this.tempStatusDate = s.leftDate;
+                    else if(s.status === 'paused') this.tempStatusDate = s.resumeDate;
+                    else this.tempStatusDate = '';
+                }
+            },
+            addStudent() {
+                if(!this.newStudent.name) return;
+                this.students.push({
+                    id: Date.now(),
+                    name: this.newStudent.name,
+                    area: this.newStudent.area,
+                    phone: this.newStudent.phone,
+                    fee: this.newStudent.fee,
+                    joinDate: this.newStudent.joinDate,
+                    status: 'active',
+                    leftDate: '',
+                    resumeDate: '',
+                    payments: []
+                });
+                this.showAddStudentModal = false;
+            },
+            setStudentStatus(status) {
+                if(!this.selectedStudent) return;
+                this.selectedStudent.status = status;
+                if(status === 'active') {
+                    this.selectedStudent.leftDate = '';
+                    this.selectedStudent.resumeDate = '';
+                } else if (status === 'left') {
+                    this.selectedStudent.leftDate = this.currentMonthKey;
+                    this.tempStatusDate = this.currentMonthKey;
+                } else if (status === 'paused') {
+                    let d = new Date();
+                    d.setMonth(d.getMonth() + 1);
+                    this.selectedStudent.resumeDate = d.toISOString().slice(0, 7);
+                    this.tempStatusDate = this.selectedStudent.resumeDate;
+                }
+            },
+            updateStatusDate(type) {
+                if(!this.selectedStudent) return;
+                if(type === 'left') this.selectedStudent.leftDate = this.tempStatusDate;
+                if(type === 'paused') this.selectedStudent.resumeDate = this.tempStatusDate;
+            },
+            payOldestDue(id) {
+                const s = this.students.find(x => x.id === id);
+                const hist = this.getStudentMonthHistory(s).reverse().find(m => m.billable && !m.paid);
+                if(hist) this.togglePayment(id, hist.key);
+            },
+            togglePayment(id, monthKey) {
+                const s = this.students.find(x => x.id === id);
+                const idx = s.payments.findIndex(p => p.month === monthKey);
+                if(idx > -1) {
+                        // For cloud sync optimization, we don't alert undo here, just do it.
+                        // if(confirm("Undo payment?")) 
+                        s.payments.splice(idx, 1);
+                } else {
+                    s.payments.push({ month: monthKey, date: new Date().toLocaleDateString('en-GB') });
+                }
+                this.students = [...this.students];
+            },
+            addExpense() {
+                if(!this.newExpense.name) return;
+                this.expenses.push({
+                    id: Date.now(),
+                    name: this.newExpense.name,
+                    amount: this.newExpense.amount,
+                    month: this.currentMonthKey
+                });
+                this.showAddExpenseModal = false;
+                this.newExpense = { name: '', amount: '' };
+            },
+            deleteExpense(id) {
+                this.expenses = this.expenses.filter(e => e.id !== id);
+            },
+            deleteStudent(id) {
+                if(confirm("Delete Permanently?")) {
+                    this.students = this.students.filter(s => s.id !== id);
+                    this.selectedStudent = null;
+                }
+            },
+            formatMoney(amount) {
+                return "₹" + Number(amount).toLocaleString('en-IN');
+            }
+        });
+
+        // --- ROBUST INITIALIZATION ---
+        // This ensures Alpine sees the data whether it loaded before OR after this module
+        if (window.Alpine) {
+            Alpine.data('busApp', busAppLogic);
+        } else {
+            document.addEventListener('alpine:init', () => {
+                Alpine.data('busApp', busAppLogic);
+            });
+        }
+    </script>
+
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+</head>
+<body class="pb-24 no-select" x-data="busApp" x-cloak>
+
+    <div x-show="loading" class="fixed inset-0 bg-indigo-700 z-50 flex items-center justify-center flex-col text-white">
+        <i class="fa-solid fa-circle-notch fa-spin text-4xl mb-4"></i>
+        <p>Loading your data...</p>
+    </div>
+
+    <div x-show="!user && !loading" class="fixed inset-0 z-40 bg-gray-50 flex items-center justify-center p-4">
+        <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm text-center">
+            <div class="bg-indigo-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-indigo-600 text-2xl">
+                <i class="fa-solid fa-bus"></i>
+            </div>
+            <h1 class="text-2xl font-bold mb-2">Bus Manager</h1>
+            <p class="text-gray-500 mb-8 text-sm">Sign in to sync your data across devices.</p>
+
+            <button @click="signInGoogle" class="w-full bg-white border border-gray-300 text-gray-700 font-bold py-3 rounded-lg flex items-center justify-center gap-2 hover:bg-gray-50 transition mb-4">
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" class="w-5 h-5">
+                Continue with Google
+            </button>
+            
+            <div class="relative my-6">
+                <div class="absolute inset-0 flex items-center"><div class="w-full border-t border-gray-200"></div></div>
+                <div class="relative flex justify-center text-sm"><span class="px-2 bg-white text-gray-500">Or email</span></div>
+            </div>
+
+            <form @submit.prevent="authMode === 'login' ? signInEmail() : signUpEmail()" class="space-y-3">
+                <input x-model="email" type="email" placeholder="Email address" class="w-full p-3 border rounded-lg bg-gray-50" required>
+                <input x-model="password" type="password" placeholder="Password" class="w-full p-3 border rounded-lg bg-gray-50" required>
+                
+                <button type="submit" class="w-full bg-indigo-600 text-white font-bold py-3 rounded-lg hover:bg-indigo-700">
+                    <span x-text="authMode === 'login' ? 'Sign In' : 'Create Account'"></span>
+                </button>
+            </form>
+
+            <p class="mt-4 text-xs text-gray-500">
+                <span x-text="authMode === 'login' ? 'New here?' : 'Already have an account?'"></span>
+                <button @click="authMode = authMode === 'login' ? 'signup' : 'login'" class="text-indigo-600 font-bold ml-1" x-text="authMode === 'login' ? 'Create Account' : 'Sign In'"></button>
+            </p>
+        </div>
+    </div>
+
+    <div x-show="user && !loading">
+        <div class="bg-indigo-700 text-white p-4 sticky top-0 z-30 shadow-lg flex justify-between items-center">
+            <div>
+                <h1 class="text-xl font-bold"><i class="fa-solid fa-bus-simple"></i> Bus Manager</h1>
+                <p class="text-xs opacity-80" x-text="user?.email"></p>
+            </div>
+            <div class="flex gap-2 items-center">
+                <span x-show="isSaving" class="text-xs bg-indigo-600 px-2 py-1 rounded animate-pulse">
+                    <i class="fa-solid fa-cloud-arrow-up"></i> Saving...
+                </span>
+                <button @click="logout" class="text-xs bg-indigo-800 p-2 rounded border border-indigo-600">
+                    <i class="fa-solid fa-right-from-bracket"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="p-4 max-w-lg mx-auto">
+            
+            <div x-show="view === 'dashboard'">
+                <div class="card p-4 mb-6 grid grid-cols-2 gap-4">
+                    <div class="text-center border-r">
+                        <p class="text-gray-500 text-xs font-bold uppercase">Collected (This Month)</p>
+                        <p class="text-xl font-bold text-green-600" x-text="formatMoney(dashboardStats.collected)"></p>
+                    </div>
+                    <div class="text-center">
+                        <p class="text-gray-500 text-xs font-bold uppercase">Total Pending</p>
+                        <p class="text-xl font-bold text-red-600" x-text="formatMoney(dashboardStats.pending)"></p>
+                    </div>
+                </div>
+
+                <div class="mb-4">
+                    <h3 class="font-bold text-gray-700 mb-2 flex items-center gap-2">
+                        <i class="fa-solid fa-circle-exclamation text-red-500"></i> Pending Fees
+                    </h3>
+                    <template x-if="studentsDue.length === 0">
+                        <div class="text-center p-8 text-gray-400 bg-white rounded-lg border-2 border-dashed">
+                            <i class="fa-solid fa-thumbs-up text-4xl mb-2 text-green-200"></i>
+                            <p>No pending fees!</p>
+                        </div>
+                    </template>
+                    <div class="space-y-3">
+                        <template x-for="student in studentsDue" :key="student.id">
+                            <div class="card p-4 flex justify-between items-center cursor-pointer hover:bg-gray-50" @click="openStudentModal(student)">
+                                <div>
+                                    <h4 class="font-bold text-lg" x-text="student.name"></h4>
+                                    <p class="text-xs text-gray-500 mb-1" x-text="student.area"></p>
+                                    <span class="bg-red-100 text-red-700 text-xs font-bold px-2 py-1 rounded">
+                                        Due: <span x-text="getDueMonthsCount(student)"></span> Month(s)
+                                    </span>
+                                </div>
+                                <div class="text-right">
+                                    <p class="font-bold text-red-600 text-lg" x-text="formatMoney(getStudentTotalDue(student))"></p>
+                                    <button @click.stop="payOldestDue(student.id)" class="mt-1 bg-green-500 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow hover:bg-green-600">
+                                        Collect 1 Mo
+                                    </button>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <div x-show="view === 'students'">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="font-bold text-lg">Student List</h2>
+                    <button @click="openAddStudent()" class="bg-indigo-600 text-white w-10 h-10 rounded-full text-xl shadow flex items-center justify-center">+</button>
+                </div>
+
+                <div class="flex gap-2 mb-4">
+                    <input x-model="searchQuery" placeholder="Search..." class="flex-1 p-2 rounded-lg border shadow-sm outline-none">
+                    <select x-model="statusFilter" class="p-2 rounded-lg border shadow-sm bg-white">
+                        <option value="all">All</option>
+                        <option value="active">Active</option>
+                        <option value="left">Left</option>
+                    </select>
+                </div>
+
+                <div class="space-y-3">
+                    <template x-for="student in filteredStudents" :key="student.id">
+                        <div class="card p-4 border-l-4 cursor-pointer" :class="{
+                            'border-green-500': student.status === 'active',
+                            'border-gray-400': student.status === 'left',
+                            'border-orange-400': student.status === 'paused'
+                        }" @click="openStudentModal(student)">
+                            <div class="flex justify-between items-start">
+                                <div>
+                                    <h3 class="font-bold text-lg" :class="student.status === 'left' ? 'text-gray-500 line-through' : ''" x-text="student.name"></h3>
+                                    <p class="text-sm text-gray-600"><span x-text="student.area"></span></p>
+                                    
+                                    <div class="mt-1">
+                                        <template x-if="student.status === 'left'">
+                                            <span class="text-xs bg-gray-200 text-gray-600 px-2 py-0.5 rounded">Left on <span x-text="student.leftDate"></span></span>
+                                        </template>
+                                        <template x-if="student.status === 'paused'">
+                                            <span class="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded">Paused till <span x-text="student.resumeDate"></span></span>
+                                        </template>
+                                    </div>
+                                </div>
+                                <div class="text-right">
+                                    <p class="font-bold text-gray-800" x-text="formatMoney(student.fee)"></p>
+                                    <template x-if="student.status === 'active' && getDueMonthsCount(student) > 0">
+                                        <span class="text-xs font-bold text-red-500">Due: <span x-text="formatMoney(getStudentTotalDue(student))"></span></span>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <div x-show="view === 'expenses'">
+                <div class="bg-white rounded-lg p-3 shadow-sm mb-4 flex justify-between items-center">
+                    <button @click="changeMonth(-1)" class="w-8 h-8 rounded-full bg-gray-100 text-gray-600"><i class="fa-solid fa-chevron-left"></i></button>
+                    <div class="text-center">
+                        <p class="font-bold text-lg text-indigo-800" x-text="formatMonth(selectedMonthKey)"></p>
+                        <p class="text-xs text-gray-400" x-show="selectedMonthKey === currentMonthKey">(Current Month)</p>
+                    </div>
+                    <button @click="changeMonth(1)" class="w-8 h-8 rounded-full bg-gray-100 text-gray-600" :disabled="selectedMonthKey >= currentMonthKey"><i class="fa-solid fa-chevron-right"></i></button>
+                </div>
+
+                <div class="card p-5 mb-6 bg-gray-800 text-white">
+                    <p class="text-gray-400 text-xs uppercase font-bold">Net Profit (<span x-text="formatMonth(selectedMonthKey)"></span>)</p>
+                    <div class="flex justify-between items-end mt-2">
+                        <p class="text-3xl font-bold" x-text="formatMoney(monthlyStats.net)"></p>
+                        <div class="text-right text-xs">
+                            <p class="text-green-400">Fees: <span x-text="formatMoney(monthlyStats.income)"></span></p>
+                            <p class="text-red-400">Exp: <span x-text="formatMoney(monthlyStats.expense)"></span></p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mb-6">
+                    <div class="flex justify-between items-center mb-2">
+                        <h3 class="font-bold text-gray-700">Expenses</h3>
+                        <button @click="showAddExpenseModal = true" class="text-xs bg-red-100 text-red-600 font-bold px-2 py-1 rounded" x-show="selectedMonthKey === currentMonthKey">+ Add</button>
+                    </div>
+                    <template x-if="monthlyExpenses.length === 0"><p class="text-sm text-gray-400 italic">No expenses recorded.</p></template>
+                    <div class="space-y-2">
+                        <template x-for="exp in monthlyExpenses" :key="exp.id">
+                            <div class="bg-white p-3 rounded-lg shadow-sm flex justify-between items-center border-l-4 border-red-400">
+                                <span x-text="exp.name" class="font-bold text-sm"></span>
+                                <div class="flex items-center gap-2">
+                                    <span class="font-bold text-red-500" x-text="formatMoney(exp.amount)"></span>
+                                    <button @click="deleteExpense(exp.id)" class="text-gray-300"><i class="fa-solid fa-times"></i></button>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <div>
+                    <h3 class="font-bold text-gray-700 mb-2">Student Status (<span x-text="formatMonth(selectedMonthKey)"></span>)</h3>
+                    <div class="flex gap-2 mb-3 text-xs">
+                        <button @click="reportFilter = 'unpaid'" class="px-3 py-1 rounded-full border transition" :class="reportFilter === 'unpaid' ? 'bg-red-500 text-white border-red-500' : 'bg-white text-gray-600'">Unpaid (<span x-text="monthlyReport.unpaid.length"></span>)</button>
+                        <button @click="reportFilter = 'paid'" class="px-3 py-1 rounded-full border transition" :class="reportFilter === 'paid' ? 'bg-green-500 text-white border-green-500' : 'bg-white text-gray-600'">Paid (<span x-text="monthlyReport.paid.length"></span>)</button>
+                    </div>
+                    <div class="space-y-2">
+                        <template x-for="item in (reportFilter === 'unpaid' ? monthlyReport.unpaid : monthlyReport.paid)" :key="item.student.id">
+                            <div class="bg-white p-3 rounded-lg shadow-sm flex justify-between items-center">
+                                <div>
+                                    <p class="font-bold text-sm" x-text="item.student.name"></p>
+                                    <p class="text-xs text-gray-500" x-text="item.student.area"></p>
+                                </div>
+                                <span class="text-xs font-bold px-2 py-1 rounded" 
+                                      :class="item.paid ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'"
+                                      x-text="item.paid ? 'PAID' : 'PENDING'"></span>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="fixed bottom-0 w-full bg-white border-t flex justify-around py-3 text-gray-500 text-xs font-bold z-30 pb-safe shadow-[0_-2px_10px_rgba(0,0,0,0.05)]">
+            <button @click="view = 'dashboard'" :class="view === 'dashboard' ? 'text-indigo-600' : ''" class="flex flex-col items-center p-2 w-full">
+                <i class="fa-solid fa-chart-pie text-xl mb-1"></i> Home
+            </button>
+            <button @click="view = 'students'" :class="view === 'students' ? 'text-indigo-600' : ''" class="flex flex-col items-center p-2 w-full">
+                <i class="fa-solid fa-users text-xl mb-1"></i> Students
+            </button>
+            <button @click="view = 'expenses'" :class="view === 'expenses' ? 'text-indigo-600' : ''" class="flex flex-col items-center p-2 w-full">
+                <i class="fa-solid fa-wallet text-xl mb-1"></i> Profit
+            </button>
+        </div>
+    </div>
+
+    <div x-show="selectedStudent" class="fixed inset-0 bg-black bg-opacity-60 flex items-end sm:items-center justify-center z-50" x-transition x-cloak>
+        <div class="bg-white w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-6 h-[85vh] sm:h-auto flex flex-col" @click.outside="selectedStudent = null">
+            <div class="flex justify-between items-start mb-4 border-b pb-2">
+                <div>
+                    <h2 class="text-xl font-bold" x-text="selectedStudent?.name"></h2>
+                    <span class="text-xs px-2 py-0.5 rounded font-bold uppercase" 
+                          :class="{
+                              'bg-green-100 text-green-700': selectedStudent?.status === 'active',
+                              'bg-gray-200 text-gray-600': selectedStudent?.status === 'left',
+                              'bg-orange-100 text-orange-700': selectedStudent?.status === 'paused'
+                          }"
+                          x-text="selectedStudent?.status"></span>
+                </div>
+                <button @click="selectedStudent = null" class="bg-gray-100 w-8 h-8 rounded-full font-bold text-gray-500">✕</button>
+            </div>
+            <div class="flex-1 overflow-y-auto pr-2">
+                <div class="mb-6 bg-gray-50 p-3 rounded-lg border">
+                    <h3 class="font-bold text-sm mb-2 text-gray-700">Manage Status</h3>
+                    <div class="grid grid-cols-3 gap-2 mb-3">
+                        <button @click="setStudentStatus('active')" class="text-xs border p-2 rounded text-center transition" :class="selectedStudent?.status === 'active' ? 'bg-green-500 text-white border-green-500' : 'bg-white'">Active</button>
+                        <button @click="setStudentStatus('paused')" class="text-xs border p-2 rounded text-center transition" :class="selectedStudent?.status === 'paused' ? 'bg-orange-500 text-white border-orange-500' : 'bg-white'">On Leave</button>
+                        <button @click="setStudentStatus('left')" class="text-xs border p-2 rounded text-center transition" :class="selectedStudent?.status === 'left' ? 'bg-gray-600 text-white border-gray-600' : 'bg-white'">Left</button>
+                    </div>
+                    <div x-show="selectedStudent?.status === 'left'" class="text-sm">
+                        <p class="mb-1">Stopped paying after:</p>
+                        <input type="month" x-model="tempStatusDate" @change="updateStatusDate('left')" class="w-full border p-1 rounded bg-white">
+                    </div>
+                    <div x-show="selectedStudent?.status === 'paused'" class="text-sm">
+                        <p class="mb-1">Will resume fees in:</p>
+                        <input type="month" x-model="tempStatusDate" @change="updateStatusDate('paused')" class="w-full border p-1 rounded bg-white">
+                    </div>
+                </div>
+                <h3 class="font-bold text-sm text-gray-500 mb-2 uppercase">Fee History</h3>
+                <div class="space-y-2">
+                    <template x-if="selectedStudent">
+                        <template x-for="month in getStudentMonthHistory(selectedStudent)" :key="month.key">
+                            <div class="flex justify-between items-center p-3 border rounded-lg transition" 
+                                 :class="month.paid ? 'bg-green-50 border-green-200' : (month.billable ? 'bg-white border-red-200 shadow-sm' : 'bg-gray-100 opacity-60')">
+                                <div>
+                                    <p class="font-bold text-gray-700" x-text="month.label"></p>
+                                    <div class="text-xs">
+                                        <template x-if="month.paid"><span class="text-green-600">Paid on <span x-text="month.paidDate"></span></span></template>
+                                        <template x-if="!month.paid && month.billable"><span class="text-red-500 font-bold">Payment Due</span></template>
+                                        <template x-if="!month.billable"><span class="text-gray-500 italic">No Fee (On Leave/Left)</span></template>
+                                    </div>
+                                </div>
+                                <button x-show="month.billable" 
+                                        @click="togglePayment(selectedStudent.id, month.key)" 
+                                        class="text-xs font-bold px-3 py-1 rounded border shadow-sm transition"
+                                        :class="month.paid ? 'bg-white text-gray-500' : 'bg-green-500 text-white hover:bg-green-600'">
+                                    <span x-text="month.paid ? 'Undo' : 'Pay'"></span>
+                                </button>
+                            </div>
+                        </template>
+                    </template>
+                </div>
+            </div>
+            <div class="mt-4 pt-2 border-t flex justify-between items-center">
+                 <button @click="deleteStudent(selectedStudent.id)" class="text-red-500 text-xs hover:text-red-700"><i class="fa-solid fa-trash"></i> Delete Forever</button>
+            </div>
+        </div>
+    </div>
+
+    <div x-show="showAddStudentModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" x-cloak>
+        <div class="bg-white rounded-lg p-6 w-full max-w-sm shadow-2xl">
+            <h3 class="font-bold text-lg mb-4">Add New Student</h3>
+            <div class="space-y-3">
+                <input x-model="newStudent.name" placeholder="Name" class="w-full border p-2 rounded focus:ring-2 ring-indigo-200 outline-none">
+                <input x-model="newStudent.area" placeholder="Area" class="w-full border p-2 rounded focus:ring-2 ring-indigo-200 outline-none">
+                <input x-model="newStudent.phone" placeholder="Phone" type="tel" class="w-full border p-2 rounded focus:ring-2 ring-indigo-200 outline-none">
+                <input x-model="newStudent.fee" placeholder="Monthly Fee" type="number" class="w-full border p-2 rounded focus:ring-2 ring-indigo-200 outline-none">
+                <div>
+                    <label class="text-xs text-gray-500">Join Month</label>
+                    <input x-model="newStudent.joinDate" type="month" class="w-full border p-2 rounded">
+                </div>
+            </div>
+            <div class="flex gap-2 mt-4">
+                <button @click="showAddStudentModal = false" class="bg-gray-100 flex-1 p-2 rounded text-gray-600 font-bold">Cancel</button>
+                <button @click="addStudent()" class="bg-indigo-600 text-white flex-1 p-2 rounded font-bold hover:bg-indigo-700">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div x-show="showAddExpenseModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" x-cloak>
+        <div class="bg-white rounded-lg p-6 w-full max-w-sm shadow-2xl">
+            <h3 class="font-bold text-lg mb-4">Add Expense (<span x-text="formatMonth(currentMonthKey)"></span>)</h3>
+            <input x-model="newExpense.name" placeholder="Item" class="w-full border p-2 mb-3 rounded focus:ring-2 ring-red-200 outline-none">
+            <input x-model="newExpense.amount" placeholder="Amount" type="number" class="w-full border p-2 mb-4 rounded focus:ring-2 ring-red-200 outline-none">
+            <div class="flex gap-2">
+                <button @click="showAddExpenseModal = false" class="bg-gray-100 flex-1 p-2 rounded text-gray-600 font-bold">Cancel</button>
+                <button @click="addExpense()" class="bg-red-500 text-white flex-1 p-2 rounded font-bold hover:bg-red-600">Save</button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
